@@ -1,0 +1,92 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL - PTERODACTYL.IO",
+  "meta": {
+      "version": "PTDL_v2",
+      "update_url": null
+  },
+  "exported_at": "2025-01-11T16:38:08-05:00",
+  "name": "Backup - Azure",
+  "author": "admin@bherville.com",
+  "description": null,
+  "features": null,
+  "docker_images": {
+      "0.1.0": "ghcr.io\/bher20\/pterodactyl-minecraft-backup-azure:0.1.0"
+  },
+  "file_denylist": [],
+  "startup": "python3 \/scripts\/backup.py",
+  "config": {
+      "files": "{}",
+      "startup": "{}",
+      "logs": "{}",
+      "stop": "^C"
+  },
+  "scripts": {
+      "installation": {
+          "script": null,
+          "container": "alpine:3.4",
+          "entrypoint": "ash"
+      }
+  },
+  "variables": [
+      {
+          "name": "Azure Storage Connection String",
+          "description": "",
+          "env_variable": "AZURE_STORAGE_CONNECTION_STRING",
+          "default_value": "",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:256",
+          "field_type": "text"
+      },
+      {
+          "name": "Backup directory",
+          "description": "",
+          "env_variable": "BACKUP_DIR",
+          "default_value": "\/var\/lib\/pterodactyl\/backups\/",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:256",
+          "field_type": "text"
+      },
+      {
+          "name": "Cron Schedule",
+          "description": "",
+          "env_variable": "CRON_SCHEDULE",
+          "default_value": "",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:20",
+          "field_type": "text"
+      },
+      {
+          "name": "Container Name",
+          "description": "",
+          "env_variable": "CONTAINER_NAME",
+          "default_value": "",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:128",
+          "field_type": "text"
+      },
+      {
+          "name": "Blob Prefix",
+          "description": "",
+          "env_variable": "BLOB_PREFIX",
+          "default_value": "minecraft-01",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:20",
+          "field_type": "text"
+      },
+      {
+          "name": "Logging Level - Verbose",
+          "description": "",
+          "env_variable": "LOGGING_VERBOSE",
+          "default_value": "true",
+          "user_viewable": false,
+          "user_editable": false,
+          "rules": "required|string|max:5",
+          "field_type": "text"
+      }
+  ]
+}

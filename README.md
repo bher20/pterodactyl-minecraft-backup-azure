@@ -31,7 +31,13 @@ This project provides a solution to back up your Minecraft server data from Pter
 
 1. Run the backup script:
   ```sh
-  docker run pterodactyl-minecraft-backup-azure:latest
+  docker run \
+  -e "AZURE_STORAGE_CONTAINER=test" \
+  -e "AZURE_STORAGE_BLOB_PREFIX=minecraft-01" \
+  -e "AZURE_STORAGE_CONTAINER=test" \
+  -e "AZURE_STORAGE_CONNECTION_STRING=test" \
+  -e "AZURE_STORAGE_SAS_TOKEN=test" \
+  -v /path/to/backups:/backups pterodactyl-minecraft-backup-azure:latest
   ```
 
 2. Schedule the script using a cron job or Pterodactyl's scheduled tasks.

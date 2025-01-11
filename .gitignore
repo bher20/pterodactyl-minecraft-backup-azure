@@ -1,0 +1,4 @@
+.env
+
+# Local Python files
+__pycache__/
