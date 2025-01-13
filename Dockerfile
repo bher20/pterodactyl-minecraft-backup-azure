@@ -11,30 +11,30 @@ RUN \
   && python3 -m pip install --upgrade pip \
   # Clean up
   && rm -rf /var/lib/apt/lists/* \
-  && rm -f /scripts/requirements.txt
+  && rm -f /app/requirements.txt
 
 
 
 # Install application
-RUN mkdir /scripts
-COPY ./requirements.txt /scripts/requirements.txt
+RUN mkdir /app
+COPY ./requirements.txt /app/requirements.txt
 RUN \
   # Install Python dependencies
-  python3 -m pip install -r /scripts/requirements.txt
+  python3 -m pip install -r /app/requirements.txt
 
-# Install Scripts
-COPY ./src/scripts/* /scripts/
+# Install application
+COPY ./src/app/* /app/
 
 RUN \
-  chmod +x /scripts/*
+  chmod +x /app/*
 
 
 # Set the working directory
-WORKDIR /scripts
-ENV PATH="/scripts:${PATH}"
+WORKDIR /app
+ENV PATH="/app:${PATH}"
 
 VOLUME [ "/backups" ]
 
-CMD [ "python3",  "/scripts/backup.py" ]
+CMD [ "python3",  "/app/backup.py" ]
 
 COPY ./metadata.json /metadata.json

@@ -121,7 +121,7 @@ class RconServer:
                         command_output = ""
 
                         if _callback:
-                            command_output, successful = _callback(self, decodedPacket.payload.decode("utf8"))
+                            command_output, successful = _callback(self, addr, decodedPacket.payload.decode("utf8"))
                             if not successful:
                                 command_status = Ident.FAILURE
 

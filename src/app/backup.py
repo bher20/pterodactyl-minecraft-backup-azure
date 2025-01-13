@@ -1,21 +1,25 @@
 import schedule
 import time
-from datetime import datetime
-from croniter import croniter
 import argparse
-import os, sys, getpass
+import os, sys, getpass, signal
 import logging
-from pythonjsonlogger import jsonlogger
-from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 import json
 import threading
-import rcon_server, backup_logger
 import enum
-import signal
 import uuid
+
+from datetime import datetime
+from croniter import croniter
+from pythonjsonlogger import jsonlogger
+from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+
+import rcon_server, backup_logger, server_command
+from database.backup_job import BackupJob
+from database.database import Database
 
 logger = backup_logger.BackupLogger().get_logger("backup", logging.INFO)
 command_threads = {}
+database_obj = None
 
 class RunType(enum.Enum):
     """
@@ -26,34 +30,43 @@ class RunType(enum.Enum):
     SERVER = "server"
     CRON_SERVER = "cron_server"
 
-class Command(enum.Enum):
-    """
-    An enumeration of the different kinds of commands that can be sent to the server.
-    """
-
-    BACKUP = "backup"
-    BACKUP_STATUS = "backup_status"
-    STOP = "stop"
-
 def str2bool(v):
   return v.lower() in ("yes", "true", "t", "1")
 
-def job(blob_service_client, container_name, backup_dir, blob_prefix, overwrite_blob, job_id):
+def job(blob_service_client, container_name, backup_dir, blob_prefix, overwrite_blob, backup_job):
     logger.info("Job is running...")
     logger.verbose(f"Backing up {backup_dir}...")
-    logger.verbose(f"Backing up {os.listdir(backup_dir)}...")
-    for root, dirs, files in os.walk(backup_dir):
-        logger.verbose(f"Current directory: {root}")
-        logger.verbose(f"Files: {files}")
-        for file_name in files:
-            logger.info(f"Current file: {file_name}")
-            file_path = os.path.join(root, file_name)
-            blob_name = os.path.join(blob_prefix, os.path.relpath(file_path, backup_dir))
-            logger.info(f"Found file {file_path}, attempting to upload as blob {blob_name}...")
-            upload_file_to_blob(blob_service_client, container_name, file_path, blob_name, overwrite_blob)
+    error = None
 
-    logger.verbose("Backup job completed, removing job from command_threads map...")
-    del command_threads[job_id]
+    try:
+        logger.verbose(f"Backing up {os.listdir(backup_dir)}...")
+
+        for root, dirs, files in os.walk(backup_dir):
+            logger.verbose(f"Current directory: {root}")
+            logger.verbose(f"Files: {files}")
+            for file_name in files:
+                try:
+                    logger.info(f"Current file: {file_name}")
+                    file_path = os.path.join(root, file_name)
+                    blob_name = os.path.join(blob_prefix, os.path.relpath(file_path, backup_dir))
+                    logger.info(f"Found file {file_path}, attempting to upload as blob {blob_name}...")
+                    upload_file_to_blob(blob_service_client, container_name, file_path, blob_name, overwrite_blob)
+                except Exception as ex:
+                    error = ex
+    except Exception as ex:
+        error = ex
+
+    if error:
+        logger.error(error)
+        backup_job.update_status("Failed", error.__str__())
+
+        if type(error) != FileNotFoundError:
+            raise error
+    else:
+        logger.info("Backup completed successfully.")
+        backup_job.update_status("Completed", "Backup completed.")
+
+    del command_threads[backup_job.id]
 
 def schedule_cron(cron_expression, job_function, *args):
     base_time = datetime.now()
@@ -90,7 +103,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Backs up a given Minecraft server directory to Azure Blob Storage.")
 
     parser.add_argument("--run_type", "-r", type=RunType, choices=list(RunType), default=RunType(os.getenv('RUN_TYPE', RunType.SERVER.value)), help="Set the run type of the script")
-    parser.add_argument("--action", "-a", type=Command, choices=list(Command), help="Set the run type of the script")
+    parser.add_argument("--action", "-a", type=server_command.CommandType, choices=list(server_command.CommandType), help="Set the run type of the script")
 
     parser.add_argument("--cron-schedule", type=str, default=os.getenv("CRON_SCHEDULE", None), help="Cron schedule expression")
     parser.add_argument("--connection-string", type=str, default=os.getenv('AZURE_STORAGE_CONNECTION_STRING', None), help="Azure Storage connection string")
@@ -108,31 +121,39 @@ def parse_args():
 
     return parser.parse_args()
 
-def process_command(server_context: rcon_server.RconServer, command: str) :
+def process_command(server_context: rcon_server.RconServer, client_addr: str, command: str):
+    global database_obj
+
     success = False
     output = None
     stop_server = False
 
     logger.info(f"Backup -> Processing command: {command}")
-    if command == Command.BACKUP.value:
+    server_cmd = server_command.ServerCommand(command)
+
+    if server_cmd.command_type == server_command.CommandType.BACKUP:
         logger.info("Backup -> Starting backup job...")
-        logger.debug(f"process_command -> {command} -> Container Name: {args.container_name}, Backup Dir: {args.backup_dir}, Blob Prefix: {args.blob_prefix}, Overwrite: {args.overwrite}")
+        logger.debug(f"process_command -> {server_cmd} -> Container Name: {args.container_name}, Backup Dir: {args.backup_dir}, Blob Prefix: {args.blob_prefix}, Overwrite: {args.overwrite}")
+
+        # Insert backup job into database
+        logger.info("Backup -> Inserting backup job into database...")
+        logger.info(f"Backup -> Database: {database_obj}")
+        backup_job_obj = BackupJob(database_obj.db_file, client_addr.__str__(), command.__str__())
 
         # Start thread to run backup job
-        job_id = uuid.uuid4()
-        job_thread = threading.Thread(target=job, args=(blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite, job_id))
-        command_threads[job_id] = {
+        job_thread = threading.Thread(target=job, args=(blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite, backup_job_obj))
+        command_threads[backup_job_obj.id] = {
           "thread": job_thread,
-          "command": command
+          "backup_job": backup_job_obj
         }
         job_thread.start()
-        output = json.dumps({"status": "success", "message": "Backup job started.", "job_id": str(job_id)})
+        output = json.dumps({"status": "success", "message": "Backup job started.", "job_id": str(backup_job_obj.id)})
         success = True
-    elif command == Command.BACKUP_STATUS.value:
+    elif server_cmd.command_type == server_command.CommandType.BACKUP_STATUS:
       # TODO: Implement backup status command
       output = json.dumps({"status": "failed", "message": "NOT YET IMPLEMENTED."})
       success = False
-    elif command == Command.STOP.value:
+    elif server_cmd.command_type == server_command.CommandType.STOP:
         output = "Backup -> Stopping backup server..."
         logger.info(output)
         server_context.stop_rcon_server()
@@ -147,6 +168,15 @@ def handler(signum, frame):
     if server:
         server.stop_rcon_server()
     sys.exit(0)
+
+def setup_database():
+    database_obj = Database("backup.db")
+    logger.verbose(f"Database Connection: {database_obj}")
+
+    logger.info("Running database migrations...")
+    database_obj.run_migrations(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'migrations'))
+
+    return database_obj
 
 server = None
 blob_service_client = None
@@ -190,6 +220,10 @@ if __name__ == "__main__":
 
     elif args.run_type == RunType.CRON_SERVER:
         logger.info(f"Running in {args.run_type.value} mode...")
+
+        logger.verbose(f"Setting up database...")
+        database_obj = setup_database()
+
         schedule_cron(args.cron_schedule, job, blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite)
 
         while True:
@@ -198,9 +232,15 @@ if __name__ == "__main__":
 
     elif args.run_type == RunType.SERVER:
         logger.info(f"Running in {args.run_type.value} mode...")
+
+        logger.verbose(f"Setting up database...")
+        database_obj = setup_database()
+
         if args.enable_rcon_server:
             server = rcon_server.RconServer(logger, args.rcon_server_host, args.rcon_server_port)
             server.start_rcon_server(process_command)
+        while True:
+            time.sleep(1)
     else:
         logger.error("Invalid run type specified.")
         sys.exit(1)
