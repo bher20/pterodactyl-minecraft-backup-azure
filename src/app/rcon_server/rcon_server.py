@@ -6,6 +6,7 @@ import struct
 import enum
 import threading
 import time
+from .response import Response
 
 class PacketKind(enum.IntEnum):
     """
@@ -35,20 +36,44 @@ class IncompletePacket(Exception):
     def __init__(self, minimum):
         self.minimum = minimum
 
+class RconServerHook(enum.IntEnum):
+  """
+  An enumeration of the different kinds of packets that can be sent to the
+  """
+
+  startup_pre = 0
+  startup_post = 5
+
+  client_socket_pre_accept = 20
+  client_socket_post_accept = 30
+  client_socket_post = 40
+
+  shutdown_pre = 100
+  shutdown_post = 120
+
 class RconServer:
     logger = None
     host = None
     port = None
     password = ""
-    client_threads = []
     stop_server = False
     server_socket = None
+
+    server_hooks = {}
 
     def __init__(self, logger, host, port, password=""):
         self.logger = logger
         self.host = host
         self.port = port
         self.password = password
+
+    def register_hook(self, rconServerhook: RconServerHook, callback):
+      self.server_hooks[rconServerhook] = callback
+    
+    def run_hook(self, rconServerhook: RconServerHook, **kwargs):
+      if rconServerhook in self.server_hooks:
+        self.logger.debug(f"The hook {rconServerhook.name} is registered, executing callback function...")
+        self.server_hooks[rconServerhook](self, rconServerhook, **kwargs)
 
     def decode_packet(self, data):
         """
@@ -71,7 +96,7 @@ class RconServer:
 
     def encode_packet(self, packet):
         """
-        Encodes a packet from the given ``Packet` instance. Returns a byte string.
+        Encodes a packet from the given `Packet` instance. Returns a byte string.
         """
         data = struct.pack("<ii", packet.ident, packet.kind) + packet.payload + b"\x00\x00"
         return struct.pack("<i", len(data)) + data
@@ -109,7 +134,7 @@ class RconServer:
         if decodedPacket.kind == PacketKind.RCON_PASSWORD:
             if str.encode(PASSWORD) == decodedPacket.payload:
                 self.logger.verbose(f"Sending password accepted message to {addr}")
-                self.send_packet(sock, Packet(Ident.SUCCESS.value, PacketKind.RCON_PASSWORD.value, "Password accepted!".encode("utf8")))
+                self.send_packet(sock, Packet(Ident.SUCCESS, PacketKind.RCON_PASSWORD, Response(False, "Password accepted!").toJSON().encode("utf8")))
 
                 while not stop_client:
                     decodedPacket = self.receive_packet(sock)
@@ -118,25 +143,32 @@ class RconServer:
                     if decodedPacket.kind == PacketKind.COMMAND:
                         self.logger.verbose(f"Received command: {decodedPacket.payload}")
                         command_status = Ident.SUCCESS
-                        command_output = ""
+                        command_response = None
 
                         if _callback:
-                            command_output, successful = _callback(self, addr, decodedPacket.payload.decode("utf8"))
-                            if not successful:
+                            command_response = _callback(self, addr, decodedPacket.payload.decode("utf8"))
+                            if not command_response.status:
                                 command_status = Ident.FAILURE
+                            
+                            if type(command_response) == Response:
+                              command_response = command_response.toJSON().encode("utf8")
+                            else:
+                              raise ValueError(f"Cannot send command output of type {type(command_response)} to client!")
+                              
 
                         # Return the results of the commend
-                        self.send_packet(sock, Packet(command_status.value, PacketKind.COMMAND.value, command_output.encode("utf8")))
+                        self.send_packet(sock, Packet(command_status.value, PacketKind.COMMAND.value, command_response))
                         stop_client = True
 
                 self.logger.info(f"Stopping connection from {addr}")
             else:
                 self.logger.info(f"Sending password rejected message to {addr}")
-                self.send_packet(sock, Packet(Ident.FAILURE, PacketKind.RCON_PASSWORD, "Password rejected!".encode("utf8")))
+                self.send_packet(sock, Packet(Ident.FAILURE, PacketKind.RCON_PASSWORD, Response(False, "Password rejected!").toJSON().encode("utf8")))
                 sock.close()
 
 
     def stop_rcon_server(self):
+        self.run_hook(RconServerHook.shutdown_pre)
         self.logger.info("stop_rcon_server-> Stopping server...")
         self.stop_server = True
 
@@ -154,36 +186,31 @@ class RconServer:
 
 
     def start_rcon_server(self, _callback=None):
-        monitor_thread = threading.Thread(target=self.monitor_server)
-        monitor_thread.start()
-
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         self.server_socket.settimeout(1.0)
         self.logger.info(f"Server started at {self.host}:{self.port}")
 
+        monitor_thread = threading.Thread(target=self.monitor_server)
+        monitor_thread.start()
+
         while not self.stop_server:
             if self.stop_server:
                 break
             try:
+                self.run_hook(RconServerHook.client_socket_pre_accept)
                 self.logger.debug("Waiting for connection...")
                 client_socket, addr = self.server_socket.accept()
+                self.run_hook(RconServerHook.client_socket_post_accept, client_addr=addr)
                 self.logger.info(f"Connection from {addr}")
                 self.process_client(client_socket, addr, _callback)
 
-                # client_thread = {
-                #     "thread": threading.Thread(target=self.process_client, args=(client_socket, addr, _callback)),
-                #     "socket": client_socket,
-                # }
-                # client_thread["thread"].start()
-                # self.client_threads.append(client_thread)
-
             except socket.timeout as e:
-                # self.logger.warn("start_rcon_server -> Server socket timeout reached...")
                 pass
         
         self.logger.info("start_rcon_server -> Server stopped...")
+        self.run_hook(RconServerHook.shutdown_post)
         
         # Stop monitoring thread
         self.logger.info("Stopping monitor thread...")

@@ -1,4 +1,5 @@
 import enum
+from utils import logger
 
 class CommandType(enum.Enum):
     """
@@ -6,7 +7,7 @@ class CommandType(enum.Enum):
     """
 
     BACKUP = "backup"
-    BACKUP_STATUS = "backup_status"
+    BACKUP_STATUS = "backup-status"
     STOP = "stop"
 
 class ServerCommand:

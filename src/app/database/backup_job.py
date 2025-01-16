@@ -1,44 +1,26 @@
-import uuid
-from database.base_model import BaseModel
+import json
 
+from sqlalchemy import Column, Integer, String, DateTime, BINARY
+from sqlalchemy.sql import func
 
-class BackupJob(BaseModel):
-    id: str = None
-    client: str = None
-    command: str = None
-    status: str = None
-    output: str = None
+from .base import Base
 
+class BackupJob(Base):
+    __tablename__ = 'backup_jobs'
 
-    def __init__(self, db_file, client_addr, command):
-        super().__init__(db_file)
-        self.create(client_addr.__str__(), command.__str__())
+    client = Column(String)
+    command = Column(String)
+    status = Column(String)
+    output = Column(String)
 
-    def create(self, client: str, command: str):
-        self.id = str(uuid.uuid4())
-        self.client = client
-        self.command = command
+    def __repr__(self) -> str:
+        return f"BackupJob(id={self.id!r}, client={self.client!r}, command={self.command!r}), status={self.status!r}), output={self.output!r}), created_at={self.created_at!r}), updated_at={self.updated_at!r})"
 
-        insert_query = "INSERT INTO backup_jobs (id, client, command) VALUES (?, ?, ?)"
-        print(f"Inserting job: {self.id}, {client}, {command}")
-        self.execute_query(insert_query, (self.id, client, command))
-
-    def get_all(self):
-        select_query = "SELECT * FROM backup_jobs"
-        return self.fetch_all(select_query)
-
-    def get(self):
-        select_query = "SELECT * FROM backup_jobs WHERE id = ?"
-        return self.fetch_one(select_query, (self.id,))
-
-    def update(self, client, command):
-        update_query = "UPDATE backup_jobs SET client = ?, command = ? WHERE id = ?"
-        self.execute_query(update_query, (client, command, self.id))
-
-    def update_status(self, status, output):
-        update_query = "UPDATE backup_jobs SET status = ?, output = ? WHERE id = ?"
-        self.execute_query(update_query, (status, output, self.id))
-
-    def delete(self):
-        delete_query = "DELETE FROM backup_jobs WHERE id = ?"
-        self.execute_query(delete_query, (self.id,))
+    def json(self) -> str:
+        return json.dumps({
+            'id': str(self.id),
+            'client': self.client,
+            'command': self.command,
+            'status': self.status,
+            'output': self.output
+        })

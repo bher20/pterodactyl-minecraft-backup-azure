@@ -13,13 +13,15 @@ from croniter import croniter
 from pythonjsonlogger import jsonlogger
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 
-import rcon_server, backup_logger, server_command
-from database.backup_job import BackupJob
-from database.database import Database
+import server_command
+import database
+from rcon_server import rcon_server, response
 
-logger = backup_logger.BackupLogger().get_logger("backup", logging.INFO)
+import backup_logger
+from utils import logger
+
 command_threads = {}
-database_obj = None
+database_session = None
 
 class RunType(enum.Enum):
     """
@@ -33,7 +35,7 @@ class RunType(enum.Enum):
 def str2bool(v):
   return v.lower() in ("yes", "true", "t", "1")
 
-def job(blob_service_client, container_name, backup_dir, blob_prefix, overwrite_blob, backup_job):
+def job(blob_service_client, container_name, backup_dir, blob_prefix, overwrite_blob, backup_job_id: str):
     logger.info("Job is running...")
     logger.verbose(f"Backing up {backup_dir}...")
     error = None
@@ -56,17 +58,23 @@ def job(blob_service_client, container_name, backup_dir, blob_prefix, overwrite_
     except Exception as ex:
         error = ex
 
+    backup_job = database_session.session.get(database.backup_job.BackupJob, backup_job_id)
+
     if error:
         logger.error(error)
-        backup_job.update_status("Failed", error.__str__())
+        backup_job.status = "Failed"
+        backup_job.output = error.__str__()
 
         if type(error) != FileNotFoundError:
             raise error
     else:
         logger.info("Backup completed successfully.")
-        backup_job.update_status("Completed", "Backup completed.")
+        backup_job.status = "Completed"
+        backup_job.output = "Backup completed."
+     
+    database_session.session.commit()
 
-    del command_threads[backup_job.id]
+    del command_threads[backup_job_id]
 
 def schedule_cron(cron_expression, job_function, *args):
     base_time = datetime.now()
@@ -121,48 +129,115 @@ def parse_args():
 
     return parser.parse_args()
 
-def process_command(server_context: rcon_server.RconServer, client_addr: str, command: str):
-    global database_obj
+def new_audit_log(function, client_addr: str = None, command: str = None, command_response = None, backup_job=None):
+    backup_job_id = None
+    if backup_job:
+        backup_job_id = backup_job.id
 
+    message = None
+    if command_response:
+        message = command_response.message
+
+    status = None
+    if command_response:
+        status = command_response.status
+
+    with database_session.session as session:
+        audit_entry = database.audit_log.AuditLogEntry(
+            function=function,
+            client=f"{client_addr[0]}:{client_addr[1]}",
+            command=command.__str__(),
+            message=message,
+            status=status,
+            backup_job_id=backup_job_id
+        )
+        session.add(audit_entry)
+        session.commit()
+
+def audit_rcon_server(rconServer: rcon_server.RconServer, rconServerhook: rcon_server.RconServerHook, **kwargs):
+  if rconServerhook == rconServerhook.client_socket_post_accept:
+    new_audit_log("rcon_server", kwargs['client_addr'])
+
+def process_command(server_context: rcon_server.RconServer, client_addr: str, command: str) -> response.Response:
     success = False
-    output = None
     stop_server = False
+    server_cmd = None
+    command_response = None
+
+    client_addr_str = f"{client_addr[0]}:{client_addr[1]}"
 
     logger.info(f"Backup -> Processing command: {command}")
-    server_cmd = server_command.ServerCommand(command)
+    try:
+        server_cmd = server_command.ServerCommand(command)
 
-    if server_cmd.command_type == server_command.CommandType.BACKUP:
+        new_audit_log("process_command", client_addr=client_addr_str, command=str(server_cmd))
+    except ValueError:
+        logger.error("Client sent an invalid command")
+        new_audit_log("process_command", client_addr=client_addr_str, command=command, message="Client sent an invalid command")
+    except Exception as error:
+        raise error
+
+    if server_cmd == None:
+        command_response = response.Response(False, "Invalid command provided")
+
+    elif server_cmd.command_type == server_command.CommandType.BACKUP:
         logger.info("Backup -> Starting backup job...")
         logger.debug(f"process_command -> {server_cmd} -> Container Name: {args.container_name}, Backup Dir: {args.backup_dir}, Blob Prefix: {args.blob_prefix}, Overwrite: {args.overwrite}")
 
         # Insert backup job into database
         logger.info("Backup -> Inserting backup job into database...")
-        logger.info(f"Backup -> Database: {database_obj}")
-        backup_job_obj = BackupJob(database_obj.db_file, client_addr.__str__(), command.__str__())
+        
+        backup_job_id = None
+        with database_session.session as session:
+            backup_job = database.backup_job.BackupJob(
+                client=client_addr_str,
+                command=command.__str__(),
+                status="In Progress"
+            )
+            session.add(backup_job)
+            session.commit()
+            backup_job_id = backup_job.id
 
         # Start thread to run backup job
-        job_thread = threading.Thread(target=job, args=(blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite, backup_job_obj))
-        command_threads[backup_job_obj.id] = {
-          "thread": job_thread,
-          "backup_job": backup_job_obj
-        }
+        backup_job = database_session.session.get(database.backup_job.BackupJob, backup_job_id)
+        job_thread = threading.Thread(target=job, args=(blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite, backup_job.id))
+        command_threads[backup_job_id] = job_thread
         job_thread.start()
-        output = json.dumps({"status": "success", "message": "Backup job started.", "job_id": str(backup_job_obj.id)})
-        success = True
+        command_response = response.Response(True, "Backup job start.", data={"job_id": str(backup_job.id)})
+
+        new_audit_log(server_command.CommandType.BACKUP.value, 
+            client_addr=client_addr_str,
+            command=server_cmd.__str__(),
+            command_response=command_response,
+            backup_job=backup_job)
+
     elif server_cmd.command_type == server_command.CommandType.BACKUP_STATUS:
-      # TODO: Implement backup status command
-      output = json.dumps({"status": "failed", "message": "NOT YET IMPLEMENTED."})
-      success = False
+        backup_job = database_session.session.get(database.backup_job.BackupJob, server_cmd.command_args[0])
+
+        logger.info(f"backup_job: {backup_job}")
+
+        if backup_job:
+            command_response = response.Response(True, backup_job.status, data=backup_job.json())
+        else:
+            command_response = response.Response(False, "Unable to find backup job using provided ID")
+
+        new_audit_log(server_command.CommandType.BACKUP_STATUS.value, 
+            client_addr=client_addr_str,
+            command=server_cmd.__str__(),
+            command_response=command_response,
+            backup_job=backup_job)
+
     elif server_cmd.command_type == server_command.CommandType.STOP:
-        output = "Backup -> Stopping backup server..."
-        logger.info(output)
+        command_response = response.Response(True, "Stopping backup server...")
+        logger.info(command_response)
+
         server_context.stop_rcon_server()
-        success = True
+
     else:
-        output = f"Backup -> Unknown command: {command}"
-        logger.error(output)
+        command_response = response.Response(False, error=f"Unknown command: {command}")
+        logger.error(command_response)
     
-    return output, success
+    return command_response
 
 def handler(signum, frame):
     if server:
@@ -170,13 +245,10 @@ def handler(signum, frame):
     sys.exit(0)
 
 def setup_database():
-    database_obj = Database("backup.db")
-    logger.verbose(f"Database Connection: {database_obj}")
+    logger.verbose(f"Setting up database...")
+    database_session = database.database_session.DatabaseSession("backup.db", args.debug)
 
-    logger.info("Running database migrations...")
-    database_obj.run_migrations(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'migrations'))
-
-    return database_obj
+    return database_session
 
 server = None
 blob_service_client = None
@@ -221,8 +293,8 @@ if __name__ == "__main__":
     elif args.run_type == RunType.CRON_SERVER:
         logger.info(f"Running in {args.run_type.value} mode...")
 
-        logger.verbose(f"Setting up database...")
-        database_obj = setup_database()
+        # Setup Database
+        database_session = setup_database()
 
         schedule_cron(args.cron_schedule, job, blob_service_client, args.container_name, args.backup_dir, args.blob_prefix, args.overwrite)
 
@@ -233,14 +305,15 @@ if __name__ == "__main__":
     elif args.run_type == RunType.SERVER:
         logger.info(f"Running in {args.run_type.value} mode...")
 
-        logger.verbose(f"Setting up database...")
-        database_obj = setup_database()
-
-        if args.enable_rcon_server:
-            server = rcon_server.RconServer(logger, args.rcon_server_host, args.rcon_server_port)
-            server.start_rcon_server(process_command)
-        while True:
-            time.sleep(1)
+        # Setup Database
+        database_session = setup_database()
     else:
         logger.error("Invalid run type specified.")
         sys.exit(1)
+
+    if args.enable_rcon_server:
+        server = rcon_server.RconServer(logger, args.rcon_server_host, args.rcon_server_port)
+        server.register_hook(rcon_server.RconServerHook.client_socket_post_accept, callback=audit_rcon_server)
+        server.start_rcon_server(process_command)
+    while True:
+        time.sleep(1)
